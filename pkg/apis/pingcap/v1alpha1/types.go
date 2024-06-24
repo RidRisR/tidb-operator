@@ -2645,8 +2645,10 @@ type RestoreSpec struct {
 	// StorageProvider configures where and how backups should be stored.
 	StorageProvider `json:",inline"`
 	// PitrFullBackupStorageProvider configures where and how pitr dependent full backup should be stored.
+	// +optional
 	PitrFullBackupStorageProvider StorageProvider `json:"pitrFullBackupStorageProvider,omitempty"`
 	// StartTs is the start timestamp which restore from
+	// +optional
 	StartTs string `json:"startTs,omitempty"`
 	// The storageClassName of the persistent volume for Restore data storage.
 	// Defaults to Kubernetes default storage class.

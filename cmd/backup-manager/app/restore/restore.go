@@ -93,12 +93,18 @@ func (ro *Options) restoreData(
 		// init pitr restore args
 		args = append(args, fmt.Sprintf("--restored-ts=%s", ro.PitrRestoredTs))
 
-		if fullBackupArgs, err := pkgutil.GenStorageArgsForFlag(restore.Spec.PitrFullBackupStorageProvider, "full-backup-storage"); err != nil {
-			return err
+		fullBackupArgs, err := pkgutil.GenStorageArgsForFlag(restore.Spec.PitrFullBackupStorageProvider, "full-backup-storage")
+		startTs := restore.Spec.StartTs
+		if err == nil && startTs != "" {
+			return fmt.Errorf("startTs or pitrFullBackupStorageProvider should be set, but not both")
+		} else if err != nil {
+			args = append(args,fullBackupArgs...)
+		} else if startTs != "" {
+			args = append(args, fmt.Sprintf("--start-ts=%s", startTs))
 		} else {
-			// parse full backup path
-			args = append(args, fullBackupArgs...)
+			return fmt.Errorf("startTs or pitrFullBackupStorageProvider should be set")
 		}
+
 		restoreType = "point"
 	case string(v1alpha1.RestoreModeVolumeSnapshot):
 		// Currently, we only support aws ebs volume snapshot.
