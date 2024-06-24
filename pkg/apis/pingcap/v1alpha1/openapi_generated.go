@@ -8217,6 +8217,13 @@ func schema_pkg_apis_pingcap_v1alpha1_RestoreSpec(ref common.ReferenceCallback) 
 							Ref:         ref("github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageProvider"),
 						},
 					},
+					"startTs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StartTs is the start timestamp which restore from",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"storageClassName": {
 						SchemaProps: spec.SchemaProps{
 							Description: "The storageClassName of the persistent volume for Restore data storage. Defaults to Kubernetes default storage class.",

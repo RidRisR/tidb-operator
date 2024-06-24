@@ -2906,6 +2906,8 @@ spec:
                 type: object
               serviceAccount:
                 type: string
+              startTs:
+                type: string
               storageClassName:
                 type: string
               storageSize:

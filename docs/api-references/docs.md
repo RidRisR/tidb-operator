@@ -1410,6 +1410,17 @@ StorageProvider
 </tr>
 <tr>
 <td>
+<code>startTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>StartTs is the start timestamp which restore from</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>storageClassName</code></br>
 <em>
 string
@@ -14561,6 +14572,17 @@ StorageProvider
 </td>
 <td>
 <p>PitrFullBackupStorageProvider configures where and how pitr dependent full backup should be stored.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>StartTs is the start timestamp which restore from</p>
 </td>
 </tr>
 <tr>
