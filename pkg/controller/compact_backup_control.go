@@ -80,7 +80,7 @@ func (c *realCompactControl) CreateCompactBackup(compact *v1alpha1.CompactBackup
 	ns := compact.GetNamespace()
 	compactName := compact.GetName()
 
-	compact,err := c.cli.PingcapV1alpha1().CompactBackups(ns).Create(context.TODO(), compact, metav1.CreateOptions{})
+	compact, err := c.cli.PingcapV1alpha1().CompactBackups(ns).Create(context.TODO(), compact, metav1.CreateOptions{})
 	bsName := compact.GetLabels()[label.BackupScheduleLabelKey]
 	if err != nil {
 		klog.Errorf("failed to create CompactBackup: [%s/%s] for backupSchedule/%s, err: %v", ns, compactName, bsName, err)
