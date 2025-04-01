@@ -1143,6 +1143,23 @@ var _ = ginkgo.Describe("Backup and Restore", func() {
 			err = checkDataIsSame(masterDSN, backupDSN)
 			framework.ExpectNoError(err)
 
+			ginkgo.By("Drop database in restore cluster")
+			err = dropDatabase(backupDSN, dbName)
+			framework.ExpectNoError(err)
+
+			ginkgo.By("Create pitr restore")
+			restoreName = "pitr-restore"
+			err = createRestoreAndWaitForComplete(f, restoreName, backupClusterName, typ, logBackupName, func(restore *v1alpha1.Restore) {
+				restore.Spec.Mode = v1alpha1.RestoreModePiTR
+				restore.Spec.PitrFullBackupStorageProvider.S3 = fullBackup.Spec.S3
+				restore.Spec.PitrRestoredTs = currentTS
+			})
+			framework.ExpectNoError(err)
+
+			ginkgo.By("wait pitr restore progress done")
+			err = brutil.WaitForRestoreProgressDone(f.ExtClient, ns, restoreName, restoreCompleteTimeout)
+			framework.ExpectNoError(err)
+
 			ginkgo.By("Delete pitr log backup")
 			err = deleteBackup(f, logBackupName)
 			framework.ExpectNoError(err)
@@ -1696,6 +1713,19 @@ func initDatabase(host, dbName string) error {
 	}
 	defer db.Close()
 	if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS " + dbName + ";"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func dropDatabase(host, dbName string) error {
+	dsn := getDefaultDSN(host, "")
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if _, err := db.Exec("DROP DATABASE IF NOT EXISTS " + dbName + ";"); err != nil {
 		return err
 	}
 	return nil
