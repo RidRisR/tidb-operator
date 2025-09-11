@@ -159,7 +159,143 @@ func (c *Controller) processLogBackupRetry(backup *v1alpha1.Backup) error {
 }
 ```
 
-### 2.4 退避策略对比
+### 2.4 状态检查机制设计
+
+基于现有架构的Job状态检查机制，设计操作级重试状态检查：
+
+#### 现有Job状态检查机制
+```go
+// 现有的Job状态检查 (backup_cleaner.go:591-607)
+func (bc *backupCleaner) isJobDoneOrFailed(job *batchv1.Job) bool {
+    for _, condition := range job.Status.Conditions {
+        if (condition.Type == batchv1.JobComplete || condition.Type == batchv1.JobFailed) && 
+            condition.Status == corev1.ConditionTrue {
+            return true
+        }
+    }
+    return false
+}
+
+func (bc *backupCleaner) isJobFailed(job *batchv1.Job) bool {
+    for _, condition := range job.Status.Conditions {
+        if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+            return true
+        }
+    }
+    return false
+}
+
+// Job获取方式 (通过JobLister)
+job, err := bm.deps.JobLister.Jobs(ns).Get(jobName)
+```
+
+#### 新设计的操作级状态检查
+```go
+// 操作级Job失败检测
+func (c *Controller) detectLogBackupJobFailure(backup *v1alpha1.Backup) (
+    jobFailed bool, reason string, originalReason string, err error) {
+    
+    ns := backup.GetNamespace()
+    jobName := backup.GetBackupJobName() // 获取当前操作的Job名称
+    
+    // Step 1: 获取Job状态
+    job, err := c.deps.JobLister.Jobs(ns).Get(jobName)
+    if err != nil {
+        if errors.IsNotFound(err) {
+            return false, "", "", nil // Job不存在，可能还未创建
+        }
+        return false, "", "", err
+    }
+    
+    // Step 2: 检查Job失败状态
+    for _, condition := range job.Status.Conditions {
+        if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+            // Step 3: 解析失败原因
+            reason := condition.Reason
+            message := condition.Message
+            
+            // Step 4: 获取Pod级别的详细错误信息
+            podFailureReason, err := c.getLogBackupPodFailureDetails(job)
+            if err == nil && podFailureReason != "" {
+                message = podFailureReason
+            }
+            
+            return true, reason, message, nil
+        }
+    }
+    
+    return false, "", "", nil
+}
+
+// 获取Pod级别的失败详情
+func (c *Controller) getLogBackupPodFailureDetails(job *batchv1.Job) (string, error) {
+    selector, err := metav1.LabelSelectorAsSelector(job.Spec.Selector)
+    if err != nil {
+        return "", err
+    }
+    
+    pods, err := c.deps.PodLister.Pods(job.Namespace).List(selector)
+    if err != nil {
+        return "", err
+    }
+    
+    for _, pod := range pods {
+        for _, containerStatus := range pod.Status.ContainerStatuses {
+            if containerStatus.State.Terminated != nil && 
+               containerStatus.State.Terminated.ExitCode != 0 {
+                return fmt.Sprintf("Container %s failed with exit code %d: %s", 
+                    containerStatus.Name,
+                    containerStatus.State.Terminated.ExitCode,
+                    containerStatus.State.Terminated.Reason), nil
+            }
+        }
+    }
+    
+    return "", nil
+}
+```
+
+#### 重试状态追踪
+```go
+// 检查重试是否应该执行
+func (c *Controller) shouldExecuteRetry(backup *v1alpha1.Backup) bool {
+    retryRecords := backup.Status.BackoffRetryStatus
+    if len(retryRecords) == 0 {
+        return false
+    }
+    
+    latestRetry := retryRecords[len(retryRecords)-1]
+    
+    // 检查是否到达预期重试时间且尚未执行
+    if latestRetry.RealRetryAt == nil && 
+       latestRetry.ExpectedRetryAt != nil && 
+       time.Now().After(latestRetry.ExpectedRetryAt.Time) {
+        return true
+    }
+    
+    return false
+}
+
+// 标记重试执行
+func (c *Controller) markRetryExecuted(backup *v1alpha1.Backup) error {
+    retryRecords := backup.Status.BackoffRetryStatus
+    if len(retryRecords) == 0 {
+        return nil
+    }
+    
+    // 更新最新重试记录的实际执行时间
+    retryRecords[len(retryRecords)-1].RealRetryAt = &metav1.Time{Time: time.Now()}
+    
+    return c.control.UpdateStatus(backup, &v1alpha1.BackupCondition{
+        Type:    v1alpha1.BackupRetrying,
+        Status:  corev1.ConditionTrue,
+        Reason:  "ExecutingRetry",
+        Message: fmt.Sprintf("Executing retry %d", len(retryRecords)),
+    }, nil)
+}
+```
+
+### 2.5 退避策略对比
 
 | 场景 | Snapshot Backup | Log Backup | 设计理由 |
 |------|----------------|------------|----------|
