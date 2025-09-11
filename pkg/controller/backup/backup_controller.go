@@ -402,13 +402,17 @@ func (c *Controller) isLogBackupFailureAlreadyRecorded(backup *v1alpha1.Backup) 
 	if len(backup.Status.BackoffRetryStatus) == 0 {
 		return false
 	}
-	// retrying
-	if isBackoffRetrying(backup) {
+	// Check if we're currently in a retry state for log backup
+	// Log backup uses BackupRetryTheFailed condition to indicate active retry
+	if backup.Status.Phase == v1alpha1.BackupRetryTheFailed {
 		return true
 	}
-	// latest failure is done, this failure should be a new one and no records
-	if isCurrentBackoffRetryDone(backup) {
-		return false
+	
+	// Check if the latest retry attempt has been completed
+	// If RealRetryAt is set, it means the retry was executed and we can record a new failure
+	latestRetry := backup.Status.BackoffRetryStatus[len(backup.Status.BackoffRetryStatus)-1]
+	if latestRetry.RealRetryAt != nil {
+		return false // Latest retry is done, can record new failure
 	}
 	return true
 }
@@ -744,9 +748,13 @@ func (c *Controller) retryLogBackupAccordingToBackoffPolicy(backup *v1alpha1.Bac
 	// Check if retry is enabled (MaxRetryTimes > 0)
 	policy := backup.Spec.BackoffRetryPolicy
 	if policy.MaxRetryTimes <= 0 {
-		klog.V(4).Infof("Retry disabled for log backup %s/%s (MaxRetryTimes=%d)", ns, name, policy.MaxRetryTimes)
+		klog.Infof("Retry disabled for log backup %s/%s (MaxRetryTimes=%d), marking as failed immediately", 
+			ns, name, policy.MaxRetryTimes)
 		return c.markLogBackupFailed(backup, reason, originalReason)
 	}
+
+	klog.Infof("Processing retry for log backup %s/%s with policy: MaxRetryTimes=%d, MinRetryDuration=%s, RetryTimeout=%s",
+		ns, name, policy.MaxRetryTimes, policy.MinRetryDuration, policy.RetryTimeout)
 
 	// Get current retry status
 	retryRecords := backup.Status.BackoffRetryStatus
@@ -754,14 +762,17 @@ func (c *Controller) retryLogBackupAccordingToBackoffPolicy(backup *v1alpha1.Bac
 
 	// Check retry count limit
 	if currentRetryNum >= policy.MaxRetryTimes {
-		klog.Infof("Log backup %s/%s exceeded max retries %d", ns, name, policy.MaxRetryTimes)
+		klog.Warningf("Log backup %s/%s exceeded max retries: attempted %d/%d retries. Final failure reason: %s", 
+			ns, name, currentRetryNum, policy.MaxRetryTimes, originalReason)
 		return c.markLogBackupFailed(backup, "ExceededMaxRetries",
 			fmt.Sprintf("Failed after %d retries. Last error: %s", currentRetryNum, originalReason))
 	}
 
 	// Check retry timeout
 	if c.isLogBackupRetryTimeout(backup, policy) {
-		klog.Infof("Log backup %s/%s retry timeout", ns, name)
+		timeElapsed := time.Since(retryRecords[0].DetectFailedAt.Time)
+		klog.Warningf("Log backup %s/%s retry timeout after %v (limit: %s). Current retry: %d/%d",
+			ns, name, timeElapsed.Round(time.Second), policy.RetryTimeout, currentRetryNum, policy.MaxRetryTimes)
 		return c.markLogBackupFailed(backup, "RetryTimeout", originalReason)
 	}
 
@@ -794,14 +805,23 @@ func (c *Controller) retryLogBackupAccordingToBackoffPolicy(backup *v1alpha1.Bac
 		return fmt.Errorf("failed to update retry status: %w", err)
 	}
 
-	// Clean up failed job
+	// Record retry started event
+	c.deps.Recorder.Eventf(backup, corev1.EventTypeNormal, "RetryStarted",
+		"Started retry attempt %d/%d for log backup due to %s. Next retry in %v",
+		retryRecord.RetryNum, policy.MaxRetryTimes, reason, backoffDuration)
+
+	// Clean up failed job before scheduling retry
 	if err := c.cleanBackupOldJobIfExist(backup); err != nil {
 		klog.Warningf("Failed to cleanup job for log backup %s/%s: %v", ns, name, err)
+		// Continue with retry scheduling even if cleanup fails
+		// The next reconcile cycle will attempt cleanup again
+	} else {
+		klog.V(4).Infof("Successfully cleaned up failed job for log backup %s/%s", ns, name)
 	}
 
 	// Schedule delayed retry
-	klog.Infof("Scheduling retry %d/%d for log backup %s/%s after %v",
-		retryRecord.RetryNum, policy.MaxRetryTimes, ns, name, backoffDuration)
+	klog.Infof("Scheduling retry %d/%d for log backup %s/%s after %v. Failure reason: %s, Original cause: %s",
+		retryRecord.RetryNum, policy.MaxRetryTimes, ns, name, backoffDuration, reason, originalReason)
 	key, err := cache.MetaNamespaceKeyFunc(backup)
 	if err != nil {
 		return fmt.Errorf("failed to get key for backup %s/%s: %v", ns, name, err)
@@ -825,6 +845,18 @@ func (c *Controller) markLogBackupFailed(backup *v1alpha1.Backup, reason, messag
 	if err != nil {
 		klog.Errorf("Fail to mark log backup %s/%s as failed: %v", ns, name, err)
 		return err
+	}
+
+	// Record retry exhausted event for specific failure reasons
+	eventType := corev1.EventTypeWarning
+	eventReason := "BackupFailed"
+	if reason == "ExceededMaxRetries" || reason == "RetryTimeout" {
+		eventReason = "RetryExhausted"
+		c.deps.Recorder.Eventf(backup, eventType, eventReason,
+			"Log backup failed permanently: %s", message)
+	} else {
+		c.deps.Recorder.Eventf(backup, eventType, eventReason,
+			"Log backup failed: %s - %s", reason, message)
 	}
 
 	klog.Infof("Marked log backup %s/%s as failed: %s - %s", ns, name, reason, message)
