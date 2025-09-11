@@ -25,10 +25,13 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	batchv1listers "k8s.io/client-go/listers/batch/v1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 func TestBackupControllerEnqueueBackup(t *testing.T) {
@@ -326,9 +329,223 @@ func newBackup() *v1alpha1.Backup {
 					SecretName: "demo",
 				},
 			},
-			StorageClassName: pointer.StringPtr("local-storage"),
+			StorageClassName: ptr.To("local-storage"),
 			StorageSize:      "1Gi",
 			CleanPolicy:      v1alpha1.CleanPolicyTypeDelete,
 		},
 	}
+}
+
+func newLogBackup() *v1alpha1.Backup {
+	backup := newBackup()
+	backup.Name = "test-log-backup"
+	backup.Spec.Mode = v1alpha1.BackupModeLog
+	backup.Spec.BackoffRetryPolicy = v1alpha1.BackoffRetryPolicy{
+		MaxRetryTimes:    5,
+		RetryTimeout:     "1h",
+		MinRetryDuration: "30s",
+	}
+	return backup
+}
+
+func TestLogBackupRetryLogic(t *testing.T) {
+	g := NewGomegaWithT(t)
+	backup := newLogBackup()
+	bkc, backupIndexer, backupControl := newFakeBackupController()
+
+	backupIndexer.Add(backup)
+
+	// Test case 1: successful retry scheduling
+	err := bkc.retryLogBackupAccordingToBackoffPolicy(backup, "TestFailure", "OriginalFailure")
+	g.Expect(err).Should(BeNil())
+	
+	// Verify retry record was added
+	g.Expect(len(backup.Status.BackoffRetryStatus)).To(Equal(1))
+	record := backup.Status.BackoffRetryStatus[0]
+	g.Expect(record.RetryNum).To(Equal(1))
+	g.Expect(record.RetryReason).To(Equal("TestFailure"))
+	g.Expect(record.OriginalReason).To(Equal("OriginalFailure"))
+	
+	// Verify backup was marked for retry
+	g.Expect(backupControl.condition).ToNot(BeNil())
+	g.Expect(backupControl.condition.Type).To(Equal(v1alpha1.BackupRetryTheFailed))
+	g.Expect(backupControl.condition.Status).To(Equal(corev1.ConditionTrue))
+}
+
+func TestLogBackupRetryExceedsMaxTimes(t *testing.T) {
+	g := NewGomegaWithT(t)
+	backup := newLogBackup()
+	bkc, backupIndexer, _ := newFakeBackupController()
+
+	backupIndexer.Add(backup)
+
+	// Add existing retry records to exceed max retry times
+	for i := 0; i < 5; i++ {
+		backup.Status.BackoffRetryStatus = append(backup.Status.BackoffRetryStatus, v1alpha1.BackoffRetryRecord{
+			RetryNum: i + 1,
+		})
+	}
+
+	// Test retry when max times exceeded
+	err := bkc.retryLogBackupAccordingToBackoffPolicy(backup, "TestFailure", "OriginalFailure")
+	g.Expect(err).Should(BeNil())
+	
+	// Verify no new retry record was added
+	g.Expect(len(backup.Status.BackoffRetryStatus)).To(Equal(5))
+}
+
+func TestLogBackupRetryTimeout(t *testing.T) {
+	g := NewGomegaWithT(t)
+	backup := newLogBackup()
+	bkc, backupIndexer, _ := newFakeBackupController()
+
+	backupIndexer.Add(backup)
+
+	// Set first retry to long ago to trigger timeout
+	oldTime := time.Now().Add(-2 * time.Hour)
+	backup.Status.BackoffRetryStatus = append(backup.Status.BackoffRetryStatus, v1alpha1.BackoffRetryRecord{
+		RetryNum:       1,
+		DetectFailedAt: &metav1.Time{Time: oldTime},
+	})
+
+	// Test retry after timeout
+	err := bkc.retryLogBackupAccordingToBackoffPolicy(backup, "TestFailure", "OriginalFailure")
+	g.Expect(err).Should(BeNil())
+	
+	// Should not add new retry record due to timeout
+	g.Expect(len(backup.Status.BackoffRetryStatus)).To(Equal(1))
+}
+
+func TestCalculateLogBackupBackoffDuration(t *testing.T) {
+	g := NewGomegaWithT(t)
+	backup := newLogBackup()
+	bkc, _, _ := newFakeBackupController()
+
+	// Test exponential backoff calculation
+	testCases := []struct {
+		retryNum int
+		expected time.Duration
+	}{
+		{1, 30 * time.Second},
+		{2, 60 * time.Second},
+		{3, 120 * time.Second},
+		{4, 240 * time.Second},
+		{5, 480 * time.Second},
+	}
+
+	for _, tc := range testCases {
+		duration := bkc.calculateLogBackupBackoffDuration(backup.Spec.BackoffRetryPolicy, tc.retryNum)
+		g.Expect(duration).To(Equal(tc.expected))
+	}
+}
+
+func TestIsLogBackupRetryTimeout(t *testing.T) {
+	g := NewGomegaWithT(t)
+	backup := newLogBackup()
+	bkc, _, _ := newFakeBackupController()
+
+	// Test case 1: no timeout
+	recent := time.Now().Add(-30 * time.Minute)
+	backup.Status.BackoffRetryStatus = []v1alpha1.BackoffRetryRecord{
+		{DetectFailedAt: &metav1.Time{Time: recent}},
+	}
+	
+	isTimeout := bkc.isLogBackupRetryTimeout(backup, backup.Spec.BackoffRetryPolicy)
+	g.Expect(isTimeout).To(BeFalse())
+
+	// Test case 2: timeout exceeded  
+	old := time.Now().Add(-2 * time.Hour)
+	backup.Status.BackoffRetryStatus = []v1alpha1.BackoffRetryRecord{
+		{DetectFailedAt: &metav1.Time{Time: old}},
+	}
+	
+	isTimeout = bkc.isLogBackupRetryTimeout(backup, backup.Spec.BackoffRetryPolicy)
+	g.Expect(isTimeout).To(BeTrue())
+}
+
+func TestLogBackupEntryPointIntegration(t *testing.T) {
+	g := NewGomegaWithT(t)
+	backup := newLogBackup()
+	bkc, backupIndexer, backupControl := newFakeBackupController()
+
+	backupIndexer.Add(backup)
+
+	// Test case 1: Log backup should trigger failure detection
+	// Mock a job failure by creating a failed job
+	ns := backup.GetNamespace()
+	jobName := backup.GetBackupJobName()
+	
+	// Create a mock job with failed status
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: ns,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "pingcap.com/v1alpha1",
+				Kind:       "Backup",
+				Name:       backup.Name,
+				UID:        backup.UID,
+			}},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{
+				Type:   batchv1.JobFailed,
+				Status: corev1.ConditionTrue,
+				Reason: "BackoffLimitExceeded",
+			}},
+		},
+	}
+	
+	// Add the job to the fake job lister
+	bkc.deps.JobLister = &FakeJobLister{job: job}
+
+	// Call updateBackup - this should trigger the retry logic
+	bkc.updateBackup(backup)
+
+	// Verify that retry was attempted
+	g.Expect(len(backup.Status.BackoffRetryStatus)).To(Equal(1))
+	g.Expect(backupControl.condition).ToNot(BeNil())
+	g.Expect(backupControl.condition.Type).To(Equal(v1alpha1.BackupRetryTheFailed))
+}
+
+// FakeJobLister for testing
+type FakeJobLister struct {
+	job *batchv1.Job
+}
+
+func (f *FakeJobLister) List(selector labels.Selector) (ret []*batchv1.Job, err error) {
+	if f.job != nil {
+		return []*batchv1.Job{f.job}, nil
+	}
+	return []*batchv1.Job{}, nil
+}
+
+func (f *FakeJobLister) Jobs(namespace string) batchv1listers.JobNamespaceLister {
+	return &FakeJobNamespaceLister{job: f.job, namespace: namespace}
+}
+
+func (f *FakeJobLister) GetPodJobs(pod *corev1.Pod) ([]batchv1.Job, error) {
+	if f.job != nil {
+		return []batchv1.Job{*f.job}, nil
+	}
+	return []batchv1.Job{}, nil
+}
+
+type FakeJobNamespaceLister struct {
+	job       *batchv1.Job
+	namespace string
+}
+
+func (f *FakeJobNamespaceLister) List(selector labels.Selector) (ret []*batchv1.Job, err error) {
+	if f.job != nil && f.job.Namespace == f.namespace {
+		return []*batchv1.Job{f.job}, nil
+	}
+	return []*batchv1.Job{}, nil
+}
+
+func (f *FakeJobNamespaceLister) Get(name string) (*batchv1.Job, error) {
+	if f.job != nil && f.job.Name == name && f.job.Namespace == f.namespace {
+		return f.job, nil
+	}
+	return nil, errors.NewNotFound(batchv1.Resource("jobs"), name)
 }

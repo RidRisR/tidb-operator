@@ -2302,7 +2302,7 @@ type BackupSpec struct {
 	// PriorityClassName of Backup Job Pods
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
-	// BackoffRetryPolicy the backoff retry policy, currently only valid for snapshot backup
+	// BackoffRetryPolicy the backoff retry policy, valid for both snapshot backup and log backup
 	BackoffRetryPolicy BackoffRetryPolicy `json:"backoffRetryPolicy,omitempty"`
 
 	// Additional volumes of component pod.
@@ -2370,7 +2370,7 @@ type BRConfig struct {
 	Options []string `json:"options,omitempty"`
 }
 
-// BackoffRetryPolicy is the backoff retry policy, currently only valid for snapshot backup.
+// BackoffRetryPolicy is the backoff retry policy, valid for both snapshot backup and log backup.
 // When backup job or pod failed, it will retry in the following way:
 // first time: retry after MinRetryDuration
 // second time: retry after MinRetryDuration * 2
