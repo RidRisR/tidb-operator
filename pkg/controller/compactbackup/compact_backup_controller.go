@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -31,6 +32,7 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/util"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -600,6 +602,19 @@ func (c *Controller) validate(compact *v1alpha1.CompactBackup) error {
 	}
 	if spec.Mode == v1alpha1.CompactModeSharded && (spec.ShardCount == nil || *spec.ShardCount < 1) {
 		return errors.NewNoStackError("shardCount must be greater than or equal to 1 when mode is sharded")
+	}
+	if spec.Mode == v1alpha1.CompactModeSharded {
+		physicalFileCacheCapacity := strings.TrimSpace(spec.PhysicalFileCacheCapacity)
+		if physicalFileCacheCapacity == "" {
+			return errors.NewNoStackError("physicalFileCacheCapacity must be set when mode is sharded")
+		}
+		capacity, err := resource.ParseQuantity(physicalFileCacheCapacity)
+		if err != nil {
+			return errors.NewNoStackError(fmt.Sprintf("invalid physicalFileCacheCapacity %q: %v", physicalFileCacheCapacity, err))
+		}
+		if capacity.Sign() <= 0 {
+			return errors.NewNoStackError("physicalFileCacheCapacity must be greater than 0")
+		}
 	}
 	if spec.Mode != v1alpha1.CompactModeSharded && spec.ShardCount != nil {
 		return errors.NewNoStackError("shardCount can only be set when mode is sharded")

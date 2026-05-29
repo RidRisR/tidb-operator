@@ -4347,6 +4347,10 @@ spec:
                     - ""
                     - sharded
                     type: string
+                  name:
+                    type: string
+                  physicalFileCacheCapacity:
+                    type: string
                   podSecurityContext:
                     properties:
                       fsGroup:
