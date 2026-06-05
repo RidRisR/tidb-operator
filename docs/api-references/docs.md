@@ -5325,7 +5325,7 @@ string
 <td>
 <em>(Optional)</em>
 <p>PhysicalFileCacheCapacity is passed to tikv-ctl compact-log-backup as &ndash;physical-file-cache-capacity.
-It uses Kubernetes quantity format, e.g. &ldquo;150G&rdquo; or &ldquo;150Gi&rdquo;, and is required when mode is sharded.</p>
+It uses Kubernetes quantity format, e.g. &ldquo;150G&rdquo; or &ldquo;150Gi&rdquo;, and defaults to &ldquo;0&rdquo; when omitted.</p>
 </td>
 </tr>
 <tr>
@@ -5736,7 +5736,7 @@ string
 <td>
 <em>(Optional)</em>
 <p>PhysicalFileCacheCapacity is passed to tikv-ctl compact-log-backup as &ndash;physical-file-cache-capacity.
-It uses Kubernetes quantity format, e.g. &ldquo;150G&rdquo; or &ldquo;150Gi&rdquo;, and is required when mode is sharded.</p>
+It uses Kubernetes quantity format, e.g. &ldquo;150G&rdquo; or &ldquo;150Gi&rdquo;, and defaults to &ldquo;0&rdquo; when omitted.</p>
 </td>
 </tr>
 <tr>
